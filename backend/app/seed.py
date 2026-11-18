@@ -79,6 +79,9 @@ USERS = [
     ("researcher1", "research123", "researcher", "研究者·甲"),
     ("researcher2", "research123", "researcher", "研究者·乙"),
     ("reviewer", "review123", "reviewer", "结果审查员"),
+    ("adjudicator1", "adjudicate123", "adjudicator", "裁定专家·甲"),
+    ("adjudicator2", "adjudicate123", "adjudicator", "裁定专家·乙"),
+    ("chief", "adjudicate123", "adjudicator", "首席裁定专家"),
 ]
 
 DEMO_RULE_CONDITIONS = [
@@ -173,3 +176,18 @@ def seed(db: Session, client=None, wait: bool = True) -> None:
     db.flush()
     rule.current_version_id = version.id
     db.commit()
+
+    # Feature 4: pull each center's local SAE candidates into audited intake
+    # batches, build de-duplicated clusters and run AR-v1 so the adjudication
+    # queue/immutable lists are usable immediately after first startup.
+    from . import competing
+    from .models import EventIntakeBatch
+
+    if db.query(EventIntakeBatch).count() == 0:
+        for code, center in centers.items():
+            try:
+                competing.intake_center(db, center, user_id=1, label="2026Q3-events")
+            except Exception:
+                # A center without events.csv must not block registry seeding;
+                # the data admin can run intake later from the Events page.
+                db.rollback()

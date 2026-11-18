@@ -6,10 +6,20 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..aggregation import aggregate, count_metrics_for
+from ..competing import aggregate_risk
 from ..config import settings
 from ..db import SessionLocal, get_db
 from ..deps import current_user, require_role
-from ..models import Center, RuleVersion, Run, RunBatch, RunCenterResult, User
+from ..models import (
+    AdjudicationSnapshot,
+    Center,
+    RuleVersion,
+    Run,
+    RunBatch,
+    RunCenterResult,
+    RunRiskResult,
+    User,
+)
 from ..orchestrator import create_run, execute_run
 from ..security import content_hash
 
@@ -23,22 +33,73 @@ def _center_map(db: Session) -> dict[int, Center]:
 
 def run_summary(run: Run, db: Session) -> dict:
     rv = run.rule_version
-    gaps = [c for c in run.center_results if c.status != "success"]
+    if run.adjudication_snapshot_id:
+        gaps = [c for c in run.risk_results if c.status != "success"]
+        total = len(run.risk_results)
+    else:
+        gaps = [c for c in run.center_results if c.status != "success"]
+        total = len(run.center_results)
     return {
         "id": run.id, "status": run.status,
+        "analysis_type": run.request_spec.get("analysis_type", "registry_aggregate"),
         "rule_version_id": run.rule_version_id,
         "rule_version_no": rv.version_no if rv else None,
         "rule_id": rv.rule_id if rv else None,
         "request_spec": run.request_spec,
         "k_threshold": run.k_threshold,
+        "time_basis": run.time_basis,
+        "adjudication_snapshot_id": run.adjudication_snapshot_id,
+        "pending_candidates": run.pending_candidates,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        "centers_total": len(run.center_results),
+        "centers_total": total,
         "centers_failed": len(gaps),
     }
 
 
+def _risk_detail(run: Run, db: Session) -> dict:
+    centers = _center_map(db)
+    batches = db.query(RunBatch).filter(RunBatch.run_id == run.id).all()
+    center_results = []
+    for rr in run.risk_results:
+        c = centers[rr.center_id]
+        batch = next((b for b in batches if b.center_id == rr.center_id), None)
+        center_results.append({
+            "center_code": c.code, "center_name": c.name,
+            "status": rr.status, "error": rr.error,
+            "batch_id": batch.batch_id if batch else None,
+            "batch_label": batch.batch_label if batch else None,
+            "total_n": (rr.aggregates or {}).get("cohort_n") if rr.aggregates else None,
+        })
+    snap = db.get(AdjudicationSnapshot, run.adjudication_snapshot_id)
+    d = run_summary(run, db)
+    d.update({
+        "conditions": run.rule_version.conditions if run.rule_version else [],
+        "conditions_hash": run.rule_version.conditions_hash if run.rule_version else None,
+        "request_hash": run.request_hash,
+        "batches": [{"center_code": centers[b.center_id].code,
+                     "batch_id": b.batch_id, "batch_label": b.batch_label}
+                    for b in batches],
+        "center_results": center_results,
+        "result": aggregate_risk(run, db),
+        "adjudication": {
+            "snapshot_id": snap.id, "snapshot_version": snap.version,
+            "snapshot_hash": snap.snapshot_hash,
+            "rule_version": snap.rule_version,
+            "pending_count": snap.pending_count,
+            "classification_counts": snap.manifest.get("classification_counts", {}),
+            "center_confirmation_coverage":
+                snap.manifest.get("center_confirmation_coverage", {}),
+            "time_basis_label": ("事件发生时间" if run.time_basis == "occurrence"
+                                 else "事件获知时间"),
+        },
+    })
+    return d
+
+
 def run_detail(run: Run, db: Session) -> dict:
+    if run.adjudication_snapshot_id:
+        return _risk_detail(run, db)
     centers = _center_map(db)
     batches = (db.query(RunBatch).filter(RunBatch.run_id == run.id).all())
     center_results = []

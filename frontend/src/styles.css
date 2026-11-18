@@ -151,3 +151,13 @@ pre.json {
   background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 6px;
   overflow: auto; font-size: 12px;
 }
+
+/* nested evidence/detail blocks in the event-adjudication pages */
+.subpanel {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #f8fafc; padding: 12px 14px; margin-top: 10px;
+}
+.subpanel h3 { margin-top: 12px; }
+.subpanel table.grid th, .subpanel table.grid td { padding: 5px 8px; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.field select, .field input, .field textarea { min-width: 180px; }

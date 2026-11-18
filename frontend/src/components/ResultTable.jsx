@@ -3,6 +3,12 @@ const METRIC_LABEL = {
   outcome_remission_n: '缓解人数',
   outcome_remission_rate: '缓解率',
   'followup.lab_value_mean': '实验室指标均值',
+  // competing-risk outcomes
+  sae_event_n: '已裁定 SAE 事件',
+  competing_death_n: '竞争终止（死亡）',
+  censored_n: '删失（失访/截点）',
+  indeterminate_n: '无法判定（转院等）',
+  pending_n: '待裁定',
 }
 
 export function metricLabel(m) {

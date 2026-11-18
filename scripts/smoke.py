@@ -12,6 +12,12 @@ HTTP center agents). Exercises every acceptance scenario:
   6. run comparison endpoint
 
 Usage: .venv/bin/python scripts/smoke.py  [BASE_URL]
+
+Feature 4 additionally exercises the SAE adjudication workflow & competing-risk
+service: audited intake, cross-center de-duplication, AR-v1 five-category
+classification, blinded votes with chief tie-break, run-freeze boundaries
+(mid-run adjudication only enters the next run), mutually-exclusive risk
+categories and adjudication provenance on the published report.
 """
 from __future__ import annotations
 
@@ -43,6 +49,10 @@ def main() -> None:
     r2 = login("researcher2", "research123")
     rev = login("reviewer", "review123")
     check("四类账号登录", True)
+    adj1 = login("adjudicator1", "adjudicate123")
+    adj2 = login("adjudicator2", "adjudicate123")
+    chief = login("chief", "adjudicate123")
+    check("裁定专家账号登录（含首席）", True)
 
     centers = httpx.get(f"{BASE}/api/admin/centers", headers=admin).json()
     check("六家中心均已注册并锁定批次",
@@ -182,6 +192,121 @@ def main() -> None:
     ver = httpx.get(f"{BASE}/api/reports/{done['published_report_id']}/verify",
                     headers=rev).json()
     check("报告哈希可复现校验", ver["intact"] is True)
+
+    # ======================================================================
+    # Feature 4: SAE adjudication workflow & competing-risk data service
+    # ======================================================================
+    # 1. audited intake for every center (seed already intakes; re-pull to
+    #    exercise the endpoint and confirm hash-stamped copies)
+    for code in ["C1", "C2", "C3", "C4", "C5", "C6"]:
+        r = httpx.post(f"{BASE}/api/events/intake/{code}", headers=admin,
+                       json={"label": "smoke-events"})
+        assert r.status_code == 201, r.text
+    intakes = httpx.get(f"{BASE}/api/events/intakes", headers=admin).json()
+    check("六中心事件候选均已审计接入且带原始快照哈希",
+          {i["center_code"] for i in intakes} == set(
+              ["C1", "C2", "C3", "C4", "C5", "C6"])
+          and all(i["source_snapshot_hash"] for i in intakes))
+
+    clusters = {c["cluster_key"]: c for c in
+                httpx.get(f"{BASE}/api/events/clusters", headers=r1).json()}
+
+    # S2: one clinical event across two centers is de-duplicated once
+    s2 = clusters["CL-C2-EVT-S2-01"]
+    check("S2 双中心同一事件去重为单簇（共用回执 XFER-2210）",
+          s2["center_codes"] == ["C2", "C4"] and s2["member_count"] == 3
+          and "XFER-2210" in s2["dedup_reason"])
+
+    # S1: late external receipt -> earliest severe occurrence, not known date
+    s1 = clusters["CL-C1-EVT-S1-01"]
+    check("S1 外院晚回执：事件日取最早阈值记录而非回执获知日",
+          s1["rule_classification"] == "confirmed_event"
+          and s1["rule_event_date"] == "2025-02-10"
+          and s1["rule_known_date"] == "2025-04-18")
+    # S4: escalation over repeated admission -> confirmed at severe date
+    check("S4 严重程度升级（重复住院）自动确认",
+          clusters["CL-C1-EVT-S4-01"]["rule_classification"] == "confirmed_event"
+          and clusters["CL-C1-EVT-S4-01"]["rule_event_date"] == "2025-03-20")
+    # S3: death before confirmation -> competing termination, never "no event"
+    check("S3 死亡先于确认 → 竞争终止",
+          clusters["CL-C3-EVT-S3-01"]["rule_classification"]
+          == "competing_termination")
+    # lost fu / transfer / insufficient land in their own categories
+    check("失访=删失、转院=无法判定、资料缺失=信息不足",
+          clusters["CL-C1-EVT-LFU-01"]["rule_classification"] == "censored"
+          and clusters["CL-C3-EVT-TRF-01"]["rule_classification"] == "indeterminate"
+          and clusters["CL-C2-EVT-INS-01"]["rule_classification"] == "insufficient")
+
+    # 2. S5: a conflict candidate is waiting in the blinded manual queue.
+    #    Freeze the FIRST adjudication list (still 1 pending) and run A before
+    #    the panel votes, so the run-freeze boundary is actually exercised.
+    queue = httpx.get(f"{BASE}/api/events/adjudication/queue",
+                      headers=adj1).json()
+    check("S5 冲突候选进入盲法人工队列", len(queue) == 1
+          and queue[0]["cluster_key"] == "CL-C2-EVT-S5-01"
+          and queue[0]["status"] == "pending")
+    tid = queue[0]["id"]
+
+    snap1 = httpx.post(f"{BASE}/api/events/snapshots", headers=r1).json()
+    check("首份裁定清单保留 1 项待裁定", snap1["pending_count"] == 1)
+    risk_spec = {"analysis_type": "competing_risk",
+                 "group_by": ["treatment.path"], "horizon_days": 365}
+    run_a = httpx.post(f"{BASE}/api/runs", headers=r1, json={
+        "rule_version_id": 1,
+        "request_spec": {**risk_spec, "time_basis": "occurrence",
+                         "adjudication_snapshot_id": snap1["id"]}}).json()
+    m_a = run_a["result"]["totals"]["metrics"]
+    check("竞争风险运行：五类互斥且穷尽（死亡/失访/转院均非“未发生”）",
+          (m_a["sae_event_n"] + m_a["competing_death_n"] + m_a["censored_n"]
+           + m_a["indeterminate_n"] + m_a["pending_n"])
+          == run_a["result"]["totals"]["n"]
+          and m_a["competing_death_n"] >= 1 and m_a["indeterminate_n"] >= 1
+          and m_a["pending_n"] == 1)
+    check("审查输出声明时间基准=事件发生时间与各中心确认覆盖",
+          run_a["adjudication"]["time_basis_label"] == "事件发生时间"
+          and len(run_a["adjudication"]["center_confirmation_coverage"]) == 6)
+
+    # 3. only AFTER run A started do the blinded experts vote (split) and the
+    #    chief breaks the tie — this adjudication can only enter the NEXT run.
+    httpx.post(f"{BASE}/api/events/adjudication/tasks/{tid}/vote",
+               headers=adj1, json={"vote": "confirmed_event",
+                                   "proposed_event_date": "2025-02-15"})
+    split = httpx.post(f"{BASE}/api/events/adjudication/tasks/{tid}/vote",
+                       headers=adj2, json={"vote": "non_event"}).json()
+    check("S5 投票分歧 → in_review 且标记 disagreement",
+          split["status"] == "in_review" and split["disagreement"] is True)
+    forbidden = httpx.post(
+        f"{BASE}/api/events/adjudication/tasks/{tid}/tie-break",
+        headers=adj1, json={"final_vote": "confirmed_event",
+                            "event_date": "2025-02-15", "comment": "x"})
+    check("非首席专家不能终裁分歧", forbidden.status_code == 403)
+    httpx.post(f"{BASE}/api/events/adjudication/tasks/{tid}/tie-break",
+               headers=chief,
+               json={"final_vote": "confirmed_event",
+                     "event_date": "2025-02-15", "known_date": "2025-02-16",
+                     "comment": "首席采信住院记录"})
+
+    # 4. mid-run adjudication only enters the NEXT run (freeze boundary)
+    events_a = m_a["sae_event_n"]
+    run_a_reload = httpx.get(f"{BASE}/api/runs/{run_a['id']}", headers=r1).json()
+    check("运行冻结：旧运行的裁定清单与待裁定数不随后续裁定改变",
+          run_a_reload["adjudication"]["snapshot_id"] == snap1["id"]
+          and run_a_reload["adjudication"]["pending_count"] == 1)
+    snap2 = httpx.post(f"{BASE}/api/events/snapshots", headers=r1).json()
+    check("新清单纳入刚完成裁定（待裁定清零，哈希不同）",
+          snap2["pending_count"] == 0
+          and snap2["snapshot_hash"] != snap1["snapshot_hash"])
+    run_b = httpx.post(f"{BASE}/api/runs", headers=r1, json={
+        "rule_version_id": 1,
+        "request_spec": {**risk_spec, "time_basis": "awareness",
+                         "adjudication_snapshot_id": snap2["id"]}}).json()
+    check("下一次运行采用新清单且时间基准=获知时间，事件数 +1",
+          run_b["time_basis"] == "awareness"
+          and run_b["result"]["totals"]["metrics"]["sae_event_n"] == events_a + 1
+          and run_b["result"]["totals"]["metrics"]["pending_n"] == 0)
+    check("裁定清单哈希可复现校验",
+          httpx.get(f"{BASE}/api/events/snapshots/{snap1['id']}/verify",
+                    headers=r1).json()["intact"] is True)
 
     print(f"\n全部 {len(CHECKS)} 项冒烟检查通过")
 

@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from . import executor
+from . import eventexec, executor
 
 
 class Job(BaseModel):
@@ -25,6 +26,16 @@ class Job(BaseModel):
     conditions: list[dict] = []
     request_spec: dict
     mapping: dict[str, dict]
+
+
+class RiskSetJob(BaseModel):
+    job_id: str | None = None
+    conditions: list[dict] = []
+    request_spec: dict
+    mapping: dict[str, dict]
+    analysis_date: str | None = None
+    adjudicated: list[dict] = []
+    pending_patient_ids: list[str] = []
 
 
 def create_app(center: str, data_dir: str) -> FastAPI:
@@ -59,6 +70,36 @@ def create_app(center: str, data_dir: str) -> FastAPI:
         try:
             return executor.execute(root, job.model_dump())
         except Exception as e:  # unexpected local failure -> reported, not zeroed
+            return {"status": "failed", "error": f"{type(e).__name__}: {e}"}
+
+    # ----- Serious Adverse Event workflow -------------------------------------
+    # The center keeps the authoritative events.csv. Intake returns an audited
+    # copy of the event-workflow evidence (adjudication needs severity/death/
+    # receipt records); the statistical risk set is still computed here and
+    # only aggregates ever leave the center.
+    @app.get("/events/meta")
+    def events_meta_endpoint():
+        if not eventexec.events_csv_path(root).exists():
+            raise HTTPException(503, "no event candidates loaded (events.csv)")
+        return {"center": center, **eventexec.events_meta(root)}
+
+    @app.post("/events/intake")
+    def events_intake():
+        rows = eventexec.load_event_candidates(root)
+        if not rows:
+            raise HTTPException(503, "no event candidates loaded")
+        # Hash the canonical serialized rows so the workspace can prove the
+        # stored snapshot matches the center's original file.
+        payload = json.dumps(rows, sort_keys=True, ensure_ascii=False)
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        return {"center": center, "candidate_count": len(rows),
+                "candidates": rows, "snapshot_hash": digest}
+
+    @app.post("/risk-set")
+    def risk_set(job: RiskSetJob):
+        try:
+            return eventexec.compute_risk_set(root, job.model_dump())
+        except Exception as e:  # reported as failure, never silently zeroed
             return {"status": "failed", "error": f"{type(e).__name__}: {e}"}
 
     return app

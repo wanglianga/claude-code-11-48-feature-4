@@ -68,6 +68,9 @@ def generate_center(center: str, root: Path, seed: int | None = None,
     rng = random.Random(seed if seed is not None else DEFAULT_SEEDS[center])
     n = size if size is not None else CENTER_SIZES[center]
     fields = CENTER_FIELDS[center]
+    from .eventgen import SCENARIO_PATIENTS
+
+    scenario_nums = set(SCENARIO_PATIENTS.get(center, []))
     rows = []
     for i in range(1, n + 1):
         sex = rng.choice(["F", "M"])
@@ -76,6 +79,15 @@ def generate_center(center: str, root: Path, seed: int | None = None,
         dx_date = f"{rng.randint(2019, 2024)}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"
         path = rng.choices(PATHS, weights=PATH_WEIGHTS, k=1)[0]
         tx_start = f"{rng.randint(2020, 2025)}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"
+        # Scenario patients get a fixed treatment start shortly before their
+        # 2025 SAE/death records so the one-year horizon actually contains them.
+        # They also satisfy the seeded approved cohort rule (RD01-03, <=2015).
+        if i in scenario_nums:
+            sex = "F"
+            byear = 2000
+            dx = "RD02"
+            dx_date = "2024-11-05"
+            tx_start = "2024-12-15"
         outcome = rng.choices(OUTCOMES, weights=OUTCOME_WEIGHTS, k=1)[0]
         fu_date = f"{rng.randint(2021, 2026)}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"
         lab = round(rng.gauss(6.0, 1.8), 2)
@@ -133,9 +145,14 @@ def main() -> None:
     args = ap.parse_args()
     root = Path(args.root)
     centers = [args.center] if args.center else list(CENTER_FIELDS)
+    from . import eventgen
+
     for c in centers:
         meta = generate_center(c, root, seed=args.seed, size=args.size)
         print(f"{c}: {meta['patients']} patients -> {root / c / 'registry.csv'}")
+        emeta = eventgen.generate_center_events(c, root)
+        print(f"{c}: {emeta['candidate_count']} event candidates -> "
+              f"{root / c / 'events.csv'}")
 
 
 if __name__ == "__main__":

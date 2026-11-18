@@ -10,24 +10,32 @@ import Compare from './pages/Compare'
 import Review from './pages/Review'
 import ReviewDetail from './pages/ReviewDetail'
 import Reports from './pages/Reports'
+import Events from './pages/Events'
+import Adjudication from './pages/Adjudication'
 
 const ROLE_HOME = {
   data_admin: '/admin',
   researcher: '/rules',
   reviewer: '/review',
+  adjudicator: '/adjudication',
 }
 
 function Nav() {
   const { user, logout } = useAuth()
   if (!user) return null
   const links = []
-  if (user.role === 'data_admin') links.push(['/admin', '数据与批次'])
+  if (user.role === 'data_admin') {
+    links.push(['/admin', '数据与批次'])
+    links.push(['/events', '事件裁定'])
+  }
   if (user.role === 'researcher') {
     links.push(['/rules', '队列规则'])
+    links.push(['/events', '事件裁定'])
     links.push(['/runs', '运行'])
     links.push(['/compare', '运行对比'])
   }
   if (user.role === 'reviewer') links.push(['/review', '审查队列'])
+  if (user.role === 'adjudicator') links.push(['/adjudication', '盲法裁定'])
   links.push(['/reports', '已发布报告'])
   return (
     <nav className="nav">
@@ -65,6 +73,8 @@ export default function App() {
           <Route path="/rules/:id" element={<Guard><RuleEditor /></Guard>} />
           <Route path="/runs" element={<Guard><Runs /></Guard>} />
           <Route path="/runs/:id" element={<Guard><RunDetail /></Guard>} />
+          <Route path="/events" element={<Guard><Events /></Guard>} />
+          <Route path="/adjudication" element={<Guard><Adjudication /></Guard>} />
           <Route path="/compare" element={<Guard><Compare /></Guard>} />
           <Route path="/review" element={<Guard><Review /></Guard>} />
           <Route path="/review/:id" element={<Guard><ReviewDetail /></Guard>} />

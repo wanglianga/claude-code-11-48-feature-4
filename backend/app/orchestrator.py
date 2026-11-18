@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from .agents import get_agent_client
+from .competing import ANALYSIS_TYPE, aggregate_risk, dispatch_risk_run
 from .models import (
     Center,
     CenterMapping,
@@ -17,6 +18,7 @@ from .models import (
     Run,
     RunBatch,
     RunCenterResult,
+    RunRiskResult,
     RuleVersion,
 )
 
@@ -35,15 +37,43 @@ def create_run(db: Session, rule_version: RuleVersion, request_spec: dict,
     if not locked:
         raise HTTPException(409, "no locked data batches; ask a data admin to lock batches first")
 
+    is_risk = request_spec.get("analysis_type") == ANALYSIS_TYPE
+    snapshot = None
+    if is_risk:
+        # A competing-risk run is bound to an immutable adjudication list.
+        # Adjudications finished while the run executes only enter the NEXT run.
+        from . import adjudication as adj
+        from .models import AdjudicationSnapshot, EventCluster
+
+        if db.query(EventCluster).count() == 0:
+            raise HTTPException(409, "尚无事件候选与裁定记录，无法启动竞争风险运行")
+        snap_id = request_spec.get("adjudication_snapshot_id")
+        if snap_id:
+            snapshot = db.get(AdjudicationSnapshot, snap_id)
+            if not snapshot or snapshot.status != "frozen":
+                raise HTTPException(409, "指定的裁定清单不存在或未冻结")
+        else:
+            snapshot = adj.freeze_snapshot(db, user_id)
+        time_basis = request_spec.get("time_basis", "occurrence")
+        if time_basis not in ("occurrence", "awareness"):
+            raise HTTPException(400, "time_basis 必须为 occurrence（发生时间）或 awareness（获知时间）")
+
     run = Run(rule_version_id=rule_version.id, request_spec=request_spec,
               request_hash=request_hash, status="pending",
               k_threshold=k_threshold, created_by=user_id)
+    if is_risk:
+        run.adjudication_snapshot_id = snapshot.id
+        run.time_basis = time_basis
+        run.pending_candidates = snapshot.pending_count
     db.add(run)
     db.flush()
     for center_id, batch in locked.items():
         db.add(RunBatch(run_id=run.id, center_id=center_id, batch_id=batch.id,
                         batch_label=batch.label))
-        db.add(RunCenterResult(run_id=run.id, center_id=center_id, status="pending"))
+        if is_risk:
+            db.add(RunRiskResult(run_id=run.id, center_id=center_id, status="pending"))
+        else:
+            db.add(RunCenterResult(run_id=run.id, center_id=center_id, status="pending"))
     db.commit()
     db.refresh(run)
     return run
@@ -51,10 +81,13 @@ def create_run(db: Session, rule_version: RuleVersion, request_spec: dict,
 
 def execute_run(db: Session, run: Run) -> Run:
     """Dispatch the job to every center in the run's batch snapshot."""
-    client = get_agent_client()
     run.status = "running"
     db.commit()
 
+    if run.adjudication_snapshot_id:
+        return _execute_risk_run(db, run)
+
+    client = get_agent_client()
     centers = {c.id: c for c in db.query(Center).all()}
     mappings = _mappings_by_center(db)
     job_base = {
@@ -88,6 +121,19 @@ def execute_run(db: Session, run: Run) -> Run:
 
     run.finished_at = datetime.now(timezone.utc)
     run.status = ("completed" if all(c.status == "success" for c in run.center_results)
+                  else "completed_with_gaps")
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def _execute_risk_run(db: Session, run: Run) -> Run:
+    """Competing-risk execution: each center computes its own risk set locally
+    from the run's frozen adjudication snapshot; only aggregates return."""
+    mappings = _mappings_by_center(db)
+    dispatch_risk_run(db, run, mappings)
+    run.finished_at = datetime.now(timezone.utc)
+    run.status = ("completed" if all(r.status == "success" for r in run.risk_results)
                   else "completed_with_gaps")
     db.commit()
     db.refresh(run)

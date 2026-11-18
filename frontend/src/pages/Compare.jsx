@@ -62,12 +62,17 @@ export default function Compare() {
           <div className="panel">
             <h3>版本与批次</h3>
             <table className="grid">
-              <thead><tr><th></th><th>规则版本</th><th>条件哈希</th><th>批次集</th><th>覆盖</th></tr></thead>
+              <thead><tr><th></th><th>规则版本</th><th>类型/时间基准</th><th>条件哈希</th><th>批次集</th><th>覆盖</th></tr></thead>
               <tbody>
                 {['a', 'b'].map((k) => (
                   <tr key={k}>
                     <td>运行 {k.toUpperCase()}（#{data[k].id}）</td>
                     <td>v{data[k].rule_version_no}</td>
+                    <td className="small">
+                      {data[k].analysis_type === 'competing_risk'
+                        ? `竞争风险·${data[k].adjudication?.time_basis_label || ''}`
+                        : '登记聚合'}
+                    </td>
                     <td className="mono small">{data[k].conditions_hash?.slice(0, 12)}…</td>
                     <td className="mono small">{batchLine(data[k])}</td>
                     <td>{data[k].result.coverage.complete

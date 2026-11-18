@@ -74,6 +74,34 @@ export default function RunDetail() {
         </table>
       </div>
 
+      {run.adjudication && (
+        <div className="panel">
+          <h2>事件裁定与竞争风险口径（运行启动时冻结）</h2>
+          <p className="small muted">
+            裁定清单 <b className="mono">{run.adjudication.snapshot_version}</b>（规则 {run.adjudication.rule_version}）·
+            时间基准：<b>{run.adjudication.time_basis_label}</b> ·
+            待裁定候选：<b className={run.adjudication.pending_count ? 'tag bad' : ''}>
+              {run.adjudication.pending_count}</b>
+            （待裁定者不计为事件，单独列示；运行期间新完成的裁定只进入下一次运行）
+          </p>
+          <p className="small mono">清单哈希：{run.adjudication.snapshot_hash}</p>
+          <h3>各中心事件确认覆盖</h3>
+          <table className="grid">
+            <thead><tr><th>中心</th><th>裁定簇数</th><th>确认事件</th><th>确认率</th></tr></thead>
+            <tbody>
+              {Object.entries(run.adjudication.center_confirmation_coverage).map(([code, v]) => (
+                <tr key={code}>
+                  <td className="mono">{code}</td><td>{v.clusters}</td><td>{v.confirmed}</td>
+                  <td>{v.confirmation_rate === null ? '—' : `${(v.confirmation_rate * 100).toFixed(1)}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <h3>分类计数</h3>
+          <p className="small mono">{JSON.stringify(run.adjudication.classification_counts)}</p>
+        </div>
+      )}
+
       <div className="panel">
         <h3>覆盖范围</h3>
         {cov.complete ? (

@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from center_agent.datagen import generate_center  # noqa: E402
+from center_agent.eventgen import generate_center_events  # noqa: E402
 
 from app import agents  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
@@ -38,6 +39,7 @@ def _gen_data() -> None:
         return
     for code in ["C1", "C2", "C3", "C4", "C5", "C6"]:
         generate_center(code, DATA_ROOT)
+        generate_center_events(code, DATA_ROOT)
 
 
 @pytest.fixture()
@@ -77,6 +79,21 @@ def researcher2(client):
 @pytest.fixture()
 def reviewer(client):
     return login(client, "reviewer", "review123")
+
+
+@pytest.fixture()
+def adjudicator1(client):
+    return login(client, "adjudicator1", "adjudicate123")
+
+
+@pytest.fixture()
+def adjudicator2(client):
+    return login(client, "adjudicator2", "adjudicate123")
+
+
+@pytest.fixture()
+def chief(client):
+    return login(client, "chief", "adjudicate123")
 
 
 def run_payload(rule_version_id: int, with_lab: bool = False) -> dict:

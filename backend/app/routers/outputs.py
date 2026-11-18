@@ -8,9 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..aggregation import aggregate, count_metrics_for
+from ..competing import aggregate_risk
 from ..db import get_db
 from ..deps import current_user, require_role
 from ..models import (
+    AdjudicationSnapshot,
     Center,
     OutputTable,
     PublishedReport,
@@ -51,6 +53,8 @@ def output_view(o: OutputTable, db: Session, full: bool = False) -> dict:
 
 
 def _run_table(run: Run, db: Session) -> dict:
+    if run.adjudication_snapshot_id:
+        return aggregate_risk(run, db)
     centers = {c.id: c for c in db.query(Center).all()}
     return aggregate(
         [{"center": centers[cr.center_id].code, "status": cr.status,
@@ -112,29 +116,41 @@ def _publish(db: Session, o: OutputTable, decision: ReviewDecision,
     run = db.get(Run, o.run_id)
     centers = {c.id: c for c in db.query(Center).all()}
     batches = db.query(RunBatch).filter(RunBatch.run_id == run.id).all()
-    report = {
-        "title": o.title,
-        "table": o.table_data,
-        "provenance": {
-            "run_id": run.id,
-            "request_spec": run.request_spec,
-            "request_hash": run.request_hash,
-            "rule_version_id": run.rule_version_id,
-            "rule_version_no": run.rule_version.version_no,
-            "conditions": run.rule_version.conditions,
-            "conditions_hash": run.rule_version.conditions_hash,
-            "batches": [{"center_code": centers[b.center_id].code,
-                         "batch_id": b.batch_id, "batch_label": b.batch_label}
-                        for b in batches],
-            "k_threshold": run.k_threshold,
-            "coverage": o.table_data.get("coverage"),
-            "review": {"decision_id": decision.id,
-                       "reviewer": reviewer.display_name,
-                       "action": decision.action,
-                       "decided_at": decision.decided_at.isoformat(),
-                       "comment": decision.comment},
-        },
+    provenance = {
+        "run_id": run.id,
+        "request_spec": run.request_spec,
+        "request_hash": run.request_hash,
+        "rule_version_id": run.rule_version_id,
+        "rule_version_no": run.rule_version.version_no,
+        "conditions": run.rule_version.conditions,
+        "conditions_hash": run.rule_version.conditions_hash,
+        "batches": [{"center_code": centers[b.center_id].code,
+                     "batch_id": b.batch_id, "batch_label": b.batch_label}
+                    for b in batches],
+        "k_threshold": run.k_threshold,
+        "coverage": o.table_data.get("coverage"),
+        "review": {"decision_id": decision.id,
+                   "reviewer": reviewer.display_name,
+                   "action": decision.action,
+                   "decided_at": decision.decided_at.isoformat(),
+                   "comment": decision.comment},
     }
+    if run.adjudication_snapshot_id:
+        snap = db.get(AdjudicationSnapshot, run.adjudication_snapshot_id)
+        provenance["adjudication"] = {
+            "snapshot_id": snap.id,
+            "snapshot_version": snap.version,
+            "snapshot_hash": snap.snapshot_hash,
+            "rule_version": snap.rule_version,
+            "time_basis": run.time_basis,
+            "time_basis_label": ("事件发生时间" if run.time_basis == "occurrence"
+                                 else "事件获知时间"),
+            "pending_candidates": run.pending_candidates,
+            "classification_counts": snap.manifest.get("classification_counts", {}),
+            "center_confirmation_coverage":
+                snap.manifest.get("center_confirmation_coverage", {}),
+        }
+    report = {"title": o.title, "table": o.table_data, "provenance": provenance}
     pub = PublishedReport(
         output_id=o.id, run_id=run.id, rule_version_id=run.rule_version_id,
         decision_id=decision.id, published_by=reviewer.id,

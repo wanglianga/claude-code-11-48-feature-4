@@ -7,6 +7,8 @@ const DEMO = [
   ['researcher1', 'research123', '研究者·甲'],
   ['researcher2', 'research123', '研究者·乙'],
   ['reviewer', 'review123', '结果审查员'],
+  ['adjudicator1', 'adjudicate123', '裁定专家·甲/乙'],
+  ['chief', 'adjudicate123', '首席裁定专家'],
 ]
 
 export default function Login() {
@@ -21,7 +23,12 @@ export default function Login() {
     setError('')
     try {
       const user = await login(username, password)
-      nav(user.role === 'data_admin' ? '/admin' : user.role === 'reviewer' ? '/review' : '/rules')
+      const home = {
+        data_admin: '/admin',
+        reviewer: '/review',
+        adjudicator: '/adjudication',
+      }[user.role] || '/rules'
+      nav(home)
     } catch (err) {
       setError(err.message || '登录失败')
     }
